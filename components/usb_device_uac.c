@@ -193,11 +193,16 @@ void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedba
 {
     (void)func_id;
     (void)alt_itf;
-    // Set feedback method to fifo counting
+
+    // Use FIFO counting method which is reliable and well-tested
+    // This method adjusts feedback based on buffer fill level to compensate for clock differences
     feedback_param->method = AUDIO_FEEDBACK_METHOD_FIFO_COUNT;
     feedback_param->sample_freq = s_uac_device->current_sample_rate;
 
-    ESP_LOGD(TAG, "Feedback method: %d, sample freq: %"PRIu32"", feedback_param->method, feedback_param->sample_freq);
+    ESP_LOGI(TAG, "USB Audio Feedback configured:");
+    ESP_LOGI(TAG, "  Method: FIFO_COUNT (adaptive)");
+    ESP_LOGI(TAG, "  Sample rate: %"PRIu32" Hz", feedback_param->sample_freq);
+    ESP_LOGI(TAG, "  Buffer size: %d frames", SPK_INTERVAL_MS + 1);
 }
 
 // Helper for feature unit get requests
@@ -398,7 +403,19 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, u
         if (bytes_remained < bytes_require) {
             return true;
         }
+        ESP_LOGI(TAG, "Audio playback started, FIFO: %d bytes", bytes_remained);
         new_play = false;
+    }
+
+    // Monitor FIFO level for diagnostics - warn if getting too low or too high
+    static int log_counter = 0;
+    if (++log_counter >= 100) {  // Log every ~100ms
+        if (bytes_remained < 100) {
+            ESP_LOGW(TAG, "FIFO low: %d bytes (risk of underrun)", bytes_remained);
+        } else if (bytes_remained > 1500) {
+            ESP_LOGW(TAG, "FIFO high: %d bytes (risk of overflow)", bytes_remained);
+        }
+        log_counter = 0;
     }
 
     s_uac_device->spk_data_size = tud_audio_read(s_uac_device->spk_buf, bytes_require);
@@ -525,6 +542,7 @@ esp_err_t uac_device_init(uac_device_config_t *config)
             ESP_LOGE(TAG, "USB Device Stack Init Fail");
             return ESP_FAIL;
         }
+
         ret_val = xTaskCreatePinnedToCore(tusb_device_task, "TinyUSB", 4096, NULL, CONFIG_UAC_TINYUSB_TASK_PRIORITY,
                                           NULL, CONFIG_UAC_TINYUSB_TASK_CORE == -1 ? tskNO_AFFINITY : CONFIG_UAC_TINYUSB_TASK_CORE);
         ESP_RETURN_ON_FALSE(ret_val == pdPASS, ESP_FAIL, TAG, "Failed to create TinyUSB task");
