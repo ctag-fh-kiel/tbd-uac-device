@@ -352,60 +352,124 @@ static void ADCHighPassDisable() {
     ESP_LOGI(TAG, "High-pass filter disabled on ADC path (all-pass/bypass mode)");
 }
 
-static void cfg_codec() {
+static void cfg_codec(const bool use_pll) {
     ESP_LOGI(TAG, "AIC3254 configuration");
-    // issue a soft reset
-    write_AIC32X4_reg(AIC32X4_RESET, 0x01);            // (P0_R1) issue a software reset to the codec
-    vTaskDelay(10 / portTICK_PERIOD_MS); // wait for device to initialize registers
-    // configure power
-    write_AIC32X4_reg(AIC32X4_PWRCFG, 0b00001000); // (P1_R1) disable crude AVDD generation from DVDD [0b00001000]
-    write_AIC32X4_reg(AIC32X4_LDOCTL, 0x01); // (P1_R2) enable analog block, AVDD LDO powered up [0b00000001]
-    write_AIC32X4_reg(AIC32X4_CMMODE, 0x08); // (P1_R10) output common mode for LOL and LOR is 1.65 from LDOIN (= Vcc / 2) [0b00001000]
-    //write_AIC32X4_reg(AIC32X4_IFACE1, 0b00110000); // I2S, 32bit depth, BCLK+WCLK as input, DOUT enabled
-    write_AIC32X4_reg(AIC32X4_IFACE1, 0b00000000); // I2S, 16bit depth, BCLK+WCLK as input, DOUT enabled
-    write_AIC32X4_reg(AIC32X4_IFACE2, 0x00); // no BCLK offset
-    write_AIC32X4_reg(AIC32X4_CLKMUX, 0b00000000); // MCLK is codec clock in, TODO: test maybe PLL clock if issues
-    write_AIC32X4_reg(AIC32X4_PLLPR, 0x00); // PLL power down
+
+    // Step 1: Define starting point - Set register page to 0
+    write_reg(AIC32X4_PSEL, 0);
+    page = 0;
+
+    // Step 2: Initiate SW Reset
+    write_AIC32X4_reg(AIC32X4_RESET, 0x01);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+
+    if (use_pll){
+        // Step 3: Program Clock Settings
+        // PLL_CLKIN = MCLK, CODEC_CLKIN = PLL_CLK
+        write_AIC32X4_reg(AIC32X4_CLKMUX, 0x03);
+
+        // Step 4: Program PLL clock dividers (P=1, R=1, J=4, D=0)
+        write_AIC32X4_reg(AIC32X4_PLLPR, 0x11);      // PLL disabled, P=1, R=1
+        write_AIC32X4_reg(AIC32X4_PLLJ, 0x04);       // J = 4
+        write_AIC32X4_reg(AIC32X4_PLLDMSB, 0x00);    // D[13:8] = 0
+        write_AIC32X4_reg(AIC32X4_PLLDLSB, 0x00);    // D[7:0] = 0
+
+        // Step 5: Power up PLL
+        write_AIC32X4_reg(AIC32X4_PLLPR, 0x91);      // Power up PLL, P=1, R=1
+        vTaskDelay(10 / portTICK_PERIOD_MS);         // Wait for PLL lock
+    }
+
+    // Step 3: Program Clock Settings default
+    // CODEC_CLKIN = MCLK
+
+    // Step 4: Program PLL clock dividers default
+
+    // Step 6: Program and power up NDAC
+    write_AIC32X4_reg(AIC32X4_NDAC, 0x81);       // Power up NDAC = 1
+
+    // Step 7: Program and power up MDAC
+    write_AIC32X4_reg(AIC32X4_MDAC, 0x82);       // Power up MDAC = 2
+
+    // Step 8: Program OSR value
     write_AIC32X4_reg(AIC32X4_DOSRMSB, 0x00);
-    write_AIC32X4_reg(AIC32X4_DOSRLSB, 0x80); // (P0_R14) set DOSR = 128 decimal or 0x0080 hex
-    write_AIC32X4_reg(AIC32X4_AOSR, 0x80); // (P0_R20) set AOSR = 128 decimal or 0x0080 hex, for decimation filters 1 to 6, ADC Oversampling
-    write_AIC32X4_reg(AIC32X4_NDAC, 0x81); // (P0_R11) power up and set NDAC = 1
-    write_AIC32X4_reg(AIC32X4_MDAC, 0x82); // (P0_R12) power up and set MDAC = 2
-    write_AIC32X4_reg(AIC32X4_NADC, 0x81); // (P0_R18) power up and set NADC = 1
-    write_AIC32X4_reg(AIC32X4_MADC, 0x82); // (P0_R19) power up and set MADC = 2
-    // TODO: DACSPB -> using default
-    // TODO: ADCSPB -> using default
-    //write_16bit_reg(AIC32X4_DACSPB, 0x08); // PRB_P8
+    write_AIC32X4_reg(AIC32X4_DOSRLSB, 0x80);    // DOSR = 128
 
-    // DAC routing and power up
-    write_AIC32X4_reg(AIC32X4_LOLROUTE, 0x08);
-    write_AIC32X4_reg(AIC32X4_LORROUTE, 0x08);
-    write_AIC32X4_reg(AIC32X4_HPLROUTE, 0x08);
-    write_AIC32X4_reg(AIC32X4_HPRROUTE, 0x08);
+    // Step 9: Program I2S word length (16-bit)
+    write_AIC32X4_reg(AIC32X4_IFACE1, 0b00000000);
+    write_AIC32X4_reg(AIC32X4_IFACE2, 0x00);
 
-    write_AIC32X4_reg(AIC32X4_DACMUTE, 0x00); // individual volume control for L/R
-    write_AIC32X4_reg(AIC32X4_LDACVOL, 0x00); // (P0_R65) set left DAC gain to 0dB DIGITAL VOL
-    write_AIC32X4_reg(AIC32X4_RDACVOL, 0x00); // (P0_R66) set right DAC gain to 0dB DIGITAL VOL
-    write_AIC32X4_reg(AIC32X4_DACSETUP, 0b11010100); // (P0_R63) Power up left and right DAC data paths and set channel [0b11010100]
-    write_AIC32X4_reg(AIC32X4_OUTPWRCTL, 0b00001100); // (P1_R9) power up HPL, HPR, LOL and LOR [0b00111100]
-    write_AIC32X4_reg(AIC32X4_HPLGAIN, 0x00); // (P1_R16) unmute HPL, set 0dB gain
-    write_AIC32X4_reg(AIC32X4_HPRGAIN, 0x00); // (P1_R16) unmute HPL, set 0dB gain
+    // Step 10: Program processing block (using defaults PRB_P1 and PRB_R1)
+    // Default values are already suitable
 
-    // ADC routing and power up
-    write_AIC32X4_reg(AIC32X4_LMICPGAPIN, 0b01000000); // IN1L routed to left MICPGA with 10k
-    write_AIC32X4_reg(AIC32X4_RMICPGAPIN, 0b01000000); // IN1L routed to left MICPGA with 10k
-    write_AIC32X4_reg(AIC32X4_LMICPGANIN, 0b01000000); // (P1_R54) CM is routed to Left MICPGA via CM1L with 10kohm resistance
-    write_AIC32X4_reg(AIC32X4_RMICPGANIN, 0b01000000); // (P1_R57) CM is routed to Right MICPGA via CM1R with 10kohm resistance
-    write_AIC32X4_reg(AIC32X4_LMICPGAVOL, 0x80); // 0dB gain for left MICPGA
-    write_AIC32X4_reg(AIC32X4_RMICPGAVOL, 0x80); // 0dB gain for left MICPGA
+    // Step 11: Program Analog Blocks - Set register page to 1
+    write_reg(AIC32X4_PSEL, 1);
+    page = 1;
+
+    // Step 12: Disable coarse AVDD generation
+    write_AIC32X4_reg(AIC32X4_PWRCFG, 0b00001000);
+
+    // Step 13: Enable Master Analog Power Control
+    write_AIC32X4_reg(AIC32X4_LDOCTL, 0x01);
+
+    // Step 14: Program Common Mode voltage
+    write_AIC32X4_reg(AIC32X4_CMMODE, 0x08);     // Output CM = 1.65V (LDOIN/2)
+
+    // Step 15: Program PowerTune (using defaults)
+    // Step 16: Program Reference fast charging (using defaults)
+    // Step 17: Program Headphone depop settings (using defaults)
+
+    // Step 18: Program routing of DAC output to output amplifiers
+    write_AIC32X4_reg(AIC32X4_LOLROUTE, 0x08);   // Left DAC to LOL
+    write_AIC32X4_reg(AIC32X4_LORROUTE, 0x08);   // Right DAC to LOR
+    write_AIC32X4_reg(AIC32X4_HPLROUTE, 0x08);   // Left DAC to HPL
+    write_AIC32X4_reg(AIC32X4_HPRROUTE, 0x08);   // Right DAC to HPR
+
+    // Step 19: Unmute and set gain of output drivers
+    write_AIC32X4_reg(AIC32X4_HPLGAIN, 0x00);    // Unmute HPL, 0dB gain
+    write_AIC32X4_reg(AIC32X4_HPRGAIN, 0x00);    // Unmute HPR, 0dB gain
+    write_AIC32X4_reg(AIC32X4_LOLGAIN, 0x06);    // Unmute LOL, 6dB gain
+    write_AIC32X4_reg(AIC32X4_LORGAIN, 0x06);    // Unmute LOR, 6dB gain
+
+    // Step 20: Power up output drivers
+    write_AIC32X4_reg(AIC32X4_OUTPWRCTL, 0b00001100); // Power up HPL, HPR, LOL, LOR
+
+    // Step 21: Apply waiting time (for depop and soft-stepping)
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+
+    // Step 22: Power Up DAC - Set register page to 0
+    write_reg(AIC32X4_PSEL, 0);
+    page = 0;
+
+    // Step 23: Power up DAC channels
+    write_AIC32X4_reg(AIC32X4_DACSETUP, 0b11010100);
+
+    // Step 24: Unmute digital volume control
+    write_AIC32X4_reg(AIC32X4_DACMUTE, 0x00);
+    write_AIC32X4_reg(AIC32X4_LDACVOL, 0x00);    // Left DAC 0dB
+    write_AIC32X4_reg(AIC32X4_RDACVOL, 0x00);    // Right DAC 0dB
+
+    // ADC Configuration (similar sequence for recording path)
+    write_AIC32X4_reg(AIC32X4_NADC, 0x81);       // Power up NADC = 1
+    write_AIC32X4_reg(AIC32X4_MADC, 0x82);       // Power up MADC = 2
+    write_AIC32X4_reg(AIC32X4_AOSR, 0x80);       // AOSR = 128
+
+    // ADC routing
+    write_reg(AIC32X4_PSEL, 1);
+    page = 1;
+    write_AIC32X4_reg(AIC32X4_LMICPGAPIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_RMICPGAPIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_LMICPGANIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_RMICPGANIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_LMICPGAVOL, 0x80);
+    write_AIC32X4_reg(AIC32X4_RMICPGAVOL, 0x80);
+
+    write_reg(AIC32X4_PSEL, 0);
+    page = 0;
     ADCHighPassEnable();
-    write_AIC32X4_reg(AIC32X4_ADCSETUP, 0b11000000); // (P0_R81) power up left and right ADCs
-    write_AIC32X4_reg(AIC32X4_ADCFGA, 0x00); // (P0_R82) unmute left and right ADCs
-
-    // unmute output drivers
-    write_AIC32X4_reg(AIC32X4_LOLGAIN, 0x06); // (P1_R18) unmute LOL, set 6dB gain
-    write_AIC32X4_reg(AIC32X4_LORGAIN, 0x06); // (P1_R18 ) unmute LOL, set 6dB gain
+    write_AIC32X4_reg(AIC32X4_ADCSETUP, 0b11000000);
+    write_AIC32X4_reg(AIC32X4_ADCFGA, 0x00);
 }
+
 
 void SetOutputLevels(const uint32_t left, const uint32_t right) {
     // incoming range expected 0..100 (percent)
@@ -459,7 +523,8 @@ static void cfg_i2s() {
             .clk_cfg = {
                     //.sample_rate_hz = 44100,
                     .sample_rate_hz = 48000,
-                    .clk_src = I2S_CLK_SRC_DEFAULT,
+                    //.clk_src = I2S_CLK_SRC_DEFAULT, // direct XTAL
+                    .clk_src = SOC_MOD_CLK_APLL,
                     .ext_clk_freq_hz = 0,
                     .mclk_multiple = I2S_MCLK_MULTIPLE_256,
                     .bclk_div = 0,
@@ -505,7 +570,7 @@ void InitCodec() {
     identify();
     SetOutputLevels(0, 0);
     cfg_i2s();
-    cfg_codec();
+    cfg_codec(false);
     SetOutputLevels(58, 58);
 }
 
