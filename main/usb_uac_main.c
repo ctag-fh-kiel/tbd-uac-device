@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "usb_device_uac.h"
 #include "codec.h"
+#include "spi_api.h"
 
 static const char *TAG = "usb_uac_main";
 
@@ -63,4 +64,6 @@ void app_main(void)
     };
 
     uac_device_init(&config);
+
+    spi_start();
 }
